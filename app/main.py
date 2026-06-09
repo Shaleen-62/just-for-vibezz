@@ -1,0 +1,181 @@
+import logging
+import time
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database import Base, engine, get_db
+from app.models import ContextBuildJob, MasterTimeline, Series
+from app.schemas import (
+    ContextJobResponse,
+    SeriesCreate,
+    SeriesResponse,
+    TimelineResponse,
+)
+from app.scraper import scrape_all
+from app.timeline import build_master_timeline
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create all tables on startup (Alembic handles this in production)
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="NewsLore", version="0.1.0")
+
+
+# ---------------------------------------------------------------------------
+# Series
+# ---------------------------------------------------------------------------
+
+@app.post("/series", response_model=SeriesResponse, status_code=201)
+def create_series(payload: SeriesCreate, db: Session = Depends(get_db)):
+    series = Series(title=payload.title, description=payload.description, status="building")
+    db.add(series)
+    db.commit()
+    db.refresh(series)
+    logger.info("Created series %d: %s", series.id, series.title)
+    return series
+
+
+@app.get("/series", response_model=List[SeriesResponse])
+def list_series(db: Session = Depends(get_db)):
+    return db.query(Series).order_by(Series.created_at.desc()).all()
+
+
+@app.get("/series/{series_id}", response_model=SeriesResponse)
+def get_series(series_id: int, db: Session = Depends(get_db)):
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    return series
+
+
+# ---------------------------------------------------------------------------
+# Pipeline A — context build
+# ---------------------------------------------------------------------------
+
+@app.post("/series/{series_id}/build", response_model=ContextJobResponse, status_code=202)
+def build_series(series_id: int, seed_urls: Optional[List[str]] = None, db: Session = Depends(get_db)):
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    if series.status == "ready":
+        raise HTTPException(status_code=409, detail="Series already built. Use /refresh to update.")
+
+    # Create the job record
+    job = ContextBuildJob(series_id=series_id, job_type="initial_build", status="processing")
+    db.add(job)
+    series.status = "building"
+    db.commit()
+    db.refresh(job)
+
+    t_total = time.time()
+
+    # --- Scraping ---
+    logger.info("Pipeline A: scraping for series %d (%s)", series_id, series.title)
+    t_scrape = time.time()
+    scraped = scrape_all(series.title, description=series.description or "", seed_urls=seed_urls or [])
+    scraping_time_ms = int((time.time() - t_scrape) * 1000)
+
+    if not scraped:
+        job.status = "failed"
+        db.commit()
+        raise HTTPException(status_code=502, detail="Scraping returned no content")
+
+    # --- Timeline build ---
+    logger.info("Pipeline A: building timeline for series %d", series_id)
+    t_timeline = time.time()
+    result = build_master_timeline(series.title, scraped, description=series.description or "")
+    timeline_time_ms = int((time.time() - t_timeline) * 1000)
+
+    # --- Store MasterTimeline ---
+    timeline = MasterTimeline(
+        series_id=series_id,
+        content=result["content"],
+        confidence_score=result["confidence_score"],
+        gaps=result["gaps"],
+        is_active=True,
+    )
+    db.add(timeline)
+
+    # --- Update series status ---
+    series.status = "ready"
+    series.last_refreshed_at = datetime.now(timezone.utc)
+
+    # --- Finalize job ---
+    total_time_ms = int((time.time() - t_total) * 1000)
+    job.status = "done"
+    job.scraping_time_ms = scraping_time_ms
+    job.timeline_time_ms = timeline_time_ms
+    job.total_time_ms = total_time_ms
+    job.completed_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(job)
+
+    logger.info(
+        "Pipeline A done for series %d — scrape: %dms, timeline: %dms, total: %dms",
+        series_id, scraping_time_ms, timeline_time_ms, total_time_ms,
+    )
+    return job
+
+
+@app.get("/series/{series_id}/timeline", response_model=TimelineResponse)
+def get_timeline(series_id: int, db: Session = Depends(get_db)):
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    timeline = (
+        db.query(MasterTimeline)
+        .filter(MasterTimeline.series_id == series_id, MasterTimeline.is_active == True)
+        .first()
+    )
+    if not timeline:
+        raise HTTPException(status_code=404, detail="No active timeline found. Run /build first.")
+    return timeline
+
+
+# ---------------------------------------------------------------------------
+# Context build job status
+# ---------------------------------------------------------------------------
+
+@app.get("/context-jobs/{job_id}", response_model=ContextJobResponse)
+def get_context_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(ContextBuildJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+# ---------------------------------------------------------------------------
+# Delete endpoints
+# ---------------------------------------------------------------------------
+
+@app.delete("/series/{series_id}", status_code=204)
+def delete_series(series_id: int, db: Session = Depends(get_db)):
+    """Deletes a series and all its timelines, episodes, and build jobs."""
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    db.delete(series)
+    db.commit()
+
+
+@app.delete("/series/{series_id}/timeline", status_code=204)
+def delete_timeline(series_id: int, db: Session = Depends(get_db)):
+    """Deletes the active timeline for a series, resetting it to needs_refresh."""
+    timeline = (
+        db.query(MasterTimeline)
+        .filter(MasterTimeline.series_id == series_id, MasterTimeline.is_active == True)
+        .first()
+    )
+    if not timeline:
+        raise HTTPException(status_code=404, detail="No active timeline found")
+    db.delete(timeline)
+    series = db.get(Series, series_id)
+    if series:
+        series.status = "building"
+    db.commit()

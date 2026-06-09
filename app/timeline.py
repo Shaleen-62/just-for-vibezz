@@ -20,8 +20,12 @@ Rules:
 - Build the timeline from agreed facts only.
 - Format each entry as: [DATE] — [EVENT DESCRIPTION]
 - Be specific with dates where possible; use approximate ranges (e.g. "Early 2018") only if needed.
+- Pay special attention to the CONTEXT FOCUS below — make sure the timeline captures those angles and connections even if they appear briefly in the sources.
 
 TOPIC: {topic}
+
+CONTEXT FOCUS (what this series cares about — use this to guide what you include):
+{description}
 
 SOURCE CONTENT:
 {source_block}
@@ -34,7 +38,7 @@ TIMELINE:
 CONFIDENCE: [a single integer from 1 to 10 rating how complete and reliable this timeline is]
 
 GAPS:
-[list the key pieces of information that are missing or uncertain]
+[list the key pieces of information that are missing or uncertain, especially regarding the context focus]
 """
 
 _MERGE_PROMPT = """
@@ -113,7 +117,7 @@ def _parse_response(raw: str) -> dict:
 # Public functions
 # ---------------------------------------------------------------------------
 
-def build_master_timeline(topic: str, scraped_content: dict[str, str]) -> dict:
+def build_master_timeline(topic: str, scraped_content: dict[str, str], description: str = "") -> dict:
     """
     Builds a master timeline from scraped content using the LLM.
 
@@ -127,7 +131,11 @@ def build_master_timeline(topic: str, scraped_content: dict[str, str]) -> dict:
     """
     logger.info("Building master timeline for: %s (%d sources)", topic, len(scraped_content))
     source_block = _format_sources(scraped_content)
-    prompt = _BUILD_PROMPT.format(topic=topic, source_block=source_block)
+    prompt = _BUILD_PROMPT.format(
+        topic=topic,
+        description=description or "No specific focus — build a general comprehensive timeline.",
+        source_block=source_block,
+    )
 
     t0 = time.time()
     raw = call_llm(prompt)

@@ -14,9 +14,9 @@ class Series(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_refreshed_at = Column(DateTime, nullable=True)
 
-    timelines = relationship("MasterTimeline", back_populates="series")
-    episodes = relationship("Episode", back_populates="series")
-    context_jobs = relationship("ContextBuildJob", back_populates="series")
+    timelines = relationship("MasterTimeline", back_populates="series", cascade="all, delete-orphan")
+    episodes = relationship("Episode", back_populates="series", cascade="all, delete-orphan")
+    context_jobs = relationship("ContextBuildJob", back_populates="series", cascade="all, delete-orphan")
 
 
 class MasterTimeline(Base):
