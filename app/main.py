@@ -7,9 +7,11 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import Base, engine, get_db
-from app.models import ContextBuildJob, MasterTimeline, Series, SeriesConnection
+from app.models import ContextBuildJob, Episode, MasterTimeline, Series, SeriesConnection
 from app.schemas import (
     ContextJobResponse,
+    EpisodeRateRequest,
+    EpisodeResponse,
     SeriesConnectionResponse,
     SeriesCreate,
     SeriesResponse,
@@ -17,6 +19,7 @@ from app.schemas import (
 )
 from app.scraper import scrape_all
 from app.timeline import build_master_timeline, discover_related_topics
+from app.pipeline import generate_episode, run_weekly_batch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -256,3 +259,57 @@ def get_context_job(job_id: int, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+# ---------------------------------------------------------------------------
+# Pipeline B — episode generation (Steps 9 + 10)
+# ---------------------------------------------------------------------------
+
+@app.post("/episodes/run", response_model=List[EpisodeResponse])
+def run_episodes(db: Session = Depends(get_db)):
+    """Generates one episode for every ready series. This is the weekly batch trigger."""
+    episodes = run_weekly_batch(db)
+    if not episodes:
+        raise HTTPException(status_code=404, detail="No ready series found. Build a series first.")
+    return episodes
+
+
+@app.post("/series/{series_id}/episode", response_model=EpisodeResponse, status_code=201)
+def run_single_episode(series_id: int, db: Session = Depends(get_db)):
+    """Generates one episode for a single series. Useful for testing without running the full batch."""
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    if series.status != "ready":
+        raise HTTPException(status_code=409, detail="Series is not ready. Run /build first.")
+    episode = generate_episode(series, db)
+    return episode
+
+
+@app.get("/episodes", response_model=List[EpisodeResponse])
+def list_episodes(series_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """Lists all episodes. Optionally filter by series_id."""
+    query = db.query(Episode).order_by(Episode.created_at.desc())
+    if series_id:
+        query = query.filter(Episode.series_id == series_id)
+    return query.all()
+
+
+@app.get("/episodes/{episode_id}", response_model=EpisodeResponse)
+def get_episode(episode_id: int, db: Session = Depends(get_db)):
+    episode = db.get(Episode, episode_id)
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return episode
+
+
+@app.post("/episodes/{episode_id}/rate", response_model=EpisodeResponse)
+def rate_episode(episode_id: int, payload: EpisodeRateRequest, db: Session = Depends(get_db)):
+    """Rate a story 1–5 after reading it. This is your quality tracking data."""
+    episode = db.get(Episode, episode_id)
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    episode.quality_rating = payload.rating
+    db.commit()
+    db.refresh(episode)
+    return episode

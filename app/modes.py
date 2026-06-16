@@ -20,6 +20,9 @@ MODES = {
     ),
 }
 
+# How many chars of each connected timeline to include as context
+RELATED_CONTEXT_CHARS = 3000
+
 
 def build_story_prompt(
     series_title: str,
@@ -27,20 +30,29 @@ def build_story_prompt(
     timeline_content: str,
     mode: str,
     previous_story: Optional[str] = None,
+    related_timelines: Optional[dict] = None,
 ) -> str:
     recap = ""
     if previous_story:
         recap = (
             f"PREVIOUS EPISODE SUMMARY:\n{previous_story}\n\n"
             f"Begin this episode with a one-sentence "
-            f"\"Previously on {series_title}...\" recap.\n"
+            f"\"Previously on {series_title}...\" recap.\n\n"
         )
 
-    return f"""
-{recap}
-MASTER TIMELINE:
-{timeline_content}
+    related_block = ""
+    if related_timelines:
+        lines = [
+            "\nRELATED CONTEXT (timelines from connected topics — weave these in where they naturally intersect with the main story):"
+        ]
+        for title, content in related_timelines.items():
+            lines.append(f"\n--- {title} ---\n{content[:RELATED_CONTEXT_CHARS]}")
+        related_block = "\n".join(lines) + "\n"
 
+    return f"""
+{recap}MASTER TIMELINE:
+{timeline_content}
+{related_block}
 YOUR TASK:
 Write Episode {episode_number} of "{series_title}" in the following style:
 {MODES[mode]}
@@ -48,8 +60,8 @@ Write Episode {episode_number} of "{series_title}" in the following style:
 REQUIREMENTS:
 - Start with "Previously on..." recap if a previous episode exists.
 - Draw from the timeline above — stay factually grounded.
-- Focus on one interesting angle or period from the timeline per episode.
-  Do not try to cover everything — leave material for future episodes.
+- Focus on one interesting angle or period from the timeline per episode. Do not try to cover everything — leave material for future episodes.
+- If RELATED CONTEXT is provided, reference those events where they naturally intersect — this is what makes the story feel like a connected web, not an isolated report.
 - End with: "Next week, we get into..." — hint at what's coming.
 - Keep it under 500 words.
 """.strip()
