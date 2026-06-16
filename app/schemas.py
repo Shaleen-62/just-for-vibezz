@@ -17,6 +17,7 @@ class SeriesResponse(BaseModel):
     title: str
     description: Optional[str]
     status: str
+    discovery_depth: int = 0
     created_at: datetime
     last_refreshed_at: Optional[datetime]
 
