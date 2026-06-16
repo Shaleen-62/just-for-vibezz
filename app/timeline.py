@@ -113,6 +113,25 @@ def _parse_response(raw: str) -> dict:
     }
 
 
+_DISCOVERY_PROMPT = """
+You just built a timeline about "{topic}".
+
+Based on this timeline, identify 3 to 5 other real-world topics, events, or domains that are directly or indirectly connected — things that either caused it, were caused by it, or happened concurrently and shaped it.
+
+Be specific. "Economy" is too vague. "US semiconductor export controls on China" is specific.
+
+TIMELINE:
+{timeline_content}
+
+Respond in EXACTLY this format — one topic per line, no other text:
+
+RELATED TOPICS:
+1. [Topic Name] | [one sentence: how this connects to the main topic]
+2. [Topic Name] | [one sentence]
+3. [Topic Name] | [one sentence]
+"""
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -151,6 +170,35 @@ def build_master_timeline(topic: str, scraped_content: dict[str, str], descripti
         "yes" if result["gaps"] else "none",
     )
     return result
+
+
+def discover_related_topics(topic: str, timeline_content: str) -> list[dict]:
+    """
+    Asks the LLM to identify 3-5 topics causally or contextually connected to this timeline.
+    Called after Pipeline A completes if series.discovery_depth < 2.
+    Returns [{"topic": str, "relationship_hint": str}, ...]
+    """
+    prompt = _DISCOVERY_PROMPT.format(
+        topic=topic,
+        timeline_content=timeline_content[:8000],  # cap to keep prompt size sane
+    )
+
+    t0 = time.time()
+    raw = call_llm(prompt)
+    elapsed = int((time.time() - t0) * 1000)
+
+    results = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        match = re.match(r"^\d+\.\s+(.+?)\s*\|\s*(.+)$", line)
+        if match:
+            results.append({
+                "topic": match.group(1).strip(),
+                "relationship_hint": match.group(2).strip(),
+            })
+
+    logger.info("Discovered %d related topics for '%s' in %dms", len(results), topic, elapsed)
+    return results
 
 
 def merge_timeline(

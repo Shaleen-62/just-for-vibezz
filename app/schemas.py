@@ -96,6 +96,22 @@ class NewsletterSendResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Series Connections
+# ---------------------------------------------------------------------------
+
+class SeriesConnectionResponse(BaseModel):
+    id: int
+    series_id: int
+    connected_topic: str
+    connected_series_id: Optional[int]
+    relationship_hint: Optional[str]
+    status: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
 

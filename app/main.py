@@ -7,15 +7,16 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import Base, engine, get_db
-from app.models import ContextBuildJob, MasterTimeline, Series
+from app.models import ContextBuildJob, MasterTimeline, Series, SeriesConnection
 from app.schemas import (
     ContextJobResponse,
+    SeriesConnectionResponse,
     SeriesCreate,
     SeriesResponse,
     TimelineResponse,
 )
 from app.scraper import scrape_all
-from app.timeline import build_master_timeline
+from app.timeline import build_master_timeline, discover_related_topics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +54,16 @@ def get_series(series_id: int, db: Session = Depends(get_db)):
     return series
 
 
+@app.delete("/series/{series_id}", status_code=204)
+def delete_series(series_id: int, db: Session = Depends(get_db)):
+    """Deletes a series and all its timelines, episodes, build jobs, and connections."""
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    db.delete(series)
+    db.commit()
+
+
 # ---------------------------------------------------------------------------
 # Pipeline A — context build
 # ---------------------------------------------------------------------------
@@ -65,7 +76,6 @@ def build_series(series_id: int, seed_urls: Optional[List[str]] = None, db: Sess
     if series.status == "ready":
         raise HTTPException(status_code=409, detail="Series already built. Use /refresh to update.")
 
-    # Create the job record
     job = ContextBuildJob(series_id=series_id, job_type="initial_build", status="processing")
     db.add(job)
     series.status = "building"
@@ -101,11 +111,10 @@ def build_series(series_id: int, seed_urls: Optional[List[str]] = None, db: Sess
     )
     db.add(timeline)
 
-    # --- Update series status ---
+    # --- Update series and job ---
     series.status = "ready"
     series.last_refreshed_at = datetime.now(timezone.utc)
 
-    # --- Finalize job ---
     total_time_ms = int((time.time() - t_total) * 1000)
     job.status = "done"
     job.scraping_time_ms = scraping_time_ms
@@ -115,11 +124,28 @@ def build_series(series_id: int, seed_urls: Optional[List[str]] = None, db: Sess
 
     db.commit()
     db.refresh(job)
+    db.refresh(timeline)
 
     logger.info(
         "Pipeline A done for series %d — scrape: %dms, timeline: %dms, total: %dms",
         series_id, scraping_time_ms, timeline_time_ms, total_time_ms,
     )
+
+    # --- Discover related topics (skip for deeply discovered series to avoid runaway expansion) ---
+    if series.discovery_depth < 2:
+        logger.info("Pipeline A: discovering related topics for series %d", series_id)
+        related = discover_related_topics(series.title, timeline.content)
+        for r in related:
+            db.add(SeriesConnection(
+                series_id=series_id,
+                connected_topic=r["topic"],
+                relationship_hint=r["relationship_hint"],
+                status="suggested",
+            ))
+        if related:
+            db.commit()
+            logger.info("Stored %d connection suggestions for series %d", len(related), series_id)
+
     return job
 
 
@@ -138,35 +164,9 @@ def get_timeline(series_id: int, db: Session = Depends(get_db)):
     return timeline
 
 
-# ---------------------------------------------------------------------------
-# Context build job status
-# ---------------------------------------------------------------------------
-
-@app.get("/context-jobs/{job_id}", response_model=ContextJobResponse)
-def get_context_job(job_id: int, db: Session = Depends(get_db)):
-    job = db.get(ContextBuildJob, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-
-# ---------------------------------------------------------------------------
-# Delete endpoints
-# ---------------------------------------------------------------------------
-
-@app.delete("/series/{series_id}", status_code=204)
-def delete_series(series_id: int, db: Session = Depends(get_db)):
-    """Deletes a series and all its timelines, episodes, and build jobs."""
-    series = db.get(Series, series_id)
-    if not series:
-        raise HTTPException(status_code=404, detail="Series not found")
-    db.delete(series)
-    db.commit()
-
-
 @app.delete("/series/{series_id}/timeline", status_code=204)
 def delete_timeline(series_id: int, db: Session = Depends(get_db)):
-    """Deletes the active timeline for a series, resetting it to needs_refresh."""
+    """Deletes the active timeline for a series, resetting it to building."""
     timeline = (
         db.query(MasterTimeline)
         .filter(MasterTimeline.series_id == series_id, MasterTimeline.is_active == True)
@@ -179,3 +179,80 @@ def delete_timeline(series_id: int, db: Session = Depends(get_db)):
     if series:
         series.status = "building"
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Series connections (knowledge graph)
+# ---------------------------------------------------------------------------
+
+@app.get("/series/{series_id}/connections", response_model=List[SeriesConnectionResponse])
+def get_connections(series_id: int, db: Session = Depends(get_db)):
+    """Lists all connections discovered for a series — suggested, approved, and dismissed."""
+    series = db.get(Series, series_id)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+    return (
+        db.query(SeriesConnection)
+        .filter(SeriesConnection.series_id == series_id)
+        .order_by(SeriesConnection.created_at)
+        .all()
+    )
+
+
+@app.post("/connections/{connection_id}/approve", response_model=SeriesResponse, status_code=201)
+def approve_connection(connection_id: int, db: Session = Depends(get_db)):
+    """
+    Approves a suggested connection — creates a new Series for that topic
+    and links it back to the connection. Run /series/{id}/build on the
+    returned series to actually build its timeline.
+    """
+    conn = db.get(SeriesConnection, connection_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.status != "suggested":
+        raise HTTPException(status_code=409, detail=f"Connection is already '{conn.status}'")
+
+    parent = db.get(Series, conn.series_id)
+    new_depth = (parent.discovery_depth + 1) if parent else 1
+
+    new_series = Series(
+        title=conn.connected_topic,
+        description=conn.relationship_hint,
+        status="building",
+        discovery_depth=new_depth,
+    )
+    db.add(new_series)
+    db.flush()  # get the new ID before committing
+
+    conn.connected_series_id = new_series.id
+    conn.status = "approved"
+    db.commit()
+    db.refresh(new_series)
+
+    logger.info(
+        "Approved connection %d → created series %d (%s, depth %d)",
+        connection_id, new_series.id, new_series.title, new_depth,
+    )
+    return new_series
+
+
+@app.delete("/connections/{connection_id}", status_code=204)
+def dismiss_connection(connection_id: int, db: Session = Depends(get_db)):
+    """Dismisses a suggested connection so it stops appearing in the list."""
+    conn = db.get(SeriesConnection, connection_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    conn.status = "dismissed"
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Context build job status
+# ---------------------------------------------------------------------------
+
+@app.get("/context-jobs/{job_id}", response_model=ContextJobResponse)
+def get_context_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(ContextBuildJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job

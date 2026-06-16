@@ -11,12 +11,19 @@ class Series(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String, default="building")  # building | ready | needs_refresh
+    discovery_depth = Column(Integer, default=0)  # 0=root, 1=discovered, 2=discovered-from-discovered
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_refreshed_at = Column(DateTime, nullable=True)
 
     timelines = relationship("MasterTimeline", back_populates="series", cascade="all, delete-orphan")
     episodes = relationship("Episode", back_populates="series", cascade="all, delete-orphan")
     context_jobs = relationship("ContextBuildJob", back_populates="series", cascade="all, delete-orphan")
+    connections = relationship(
+        "SeriesConnection",
+        primaryjoin="Series.id == SeriesConnection.series_id",
+        back_populates="series",
+        cascade="all, delete-orphan",
+    )
 
 
 class MasterTimeline(Base):
@@ -29,7 +36,7 @@ class MasterTimeline(Base):
     gaps = Column(Text, nullable=True)                 # what the LLM flagged as missing
     is_active = Column(Boolean, default=True)
     built_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    superseded_at = Column(DateTime, nullable=True)    # set when a newer version replaces this
+    superseded_at = Column(DateTime, nullable=True)
 
     series = relationship("Series", back_populates="timelines")
     episodes = relationship("Episode", back_populates="timeline")
@@ -67,3 +74,17 @@ class ContextBuildJob(Base):
     completed_at = Column(DateTime, nullable=True)
 
     series = relationship("Series", back_populates="context_jobs")
+
+
+class SeriesConnection(Base):
+    __tablename__ = "series_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    series_id = Column(Integer, ForeignKey("series.id"), nullable=False)
+    connected_topic = Column(String, nullable=False)
+    connected_series_id = Column(Integer, ForeignKey("series.id"), nullable=True)  # set when approved
+    relationship_hint = Column(Text, nullable=True)    # one-sentence explanation from the LLM
+    status = Column(String, default="suggested")       # suggested | approved | dismissed
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    series = relationship("Series", foreign_keys=[series_id], back_populates="connections")
