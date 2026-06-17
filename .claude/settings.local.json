@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"c:\\\\Users\\\\Naresh Malik\\\\Desktop\\\\just-for-vibezz\\\\venv\\\\Scripts\\\\python.exe\" -c \"import fastapi, sqlalchemy, anthropic, apscheduler; print\\('All good'\\)\" 2>&1)"
+    ]
+  }
+}
