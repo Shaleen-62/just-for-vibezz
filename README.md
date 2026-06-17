@@ -195,6 +195,111 @@ The API starts an APScheduler `BackgroundScheduler` on boot. It runs `POST /epis
 
 ---
 
+## Database Commands
+
+All commands below assume you are in the project root and the server is stopped (unless noted).
+
+### Reset the database
+
+Required whenever the schema changes (new columns, new tables). All data is lost.
+
+```powershell
+# Windows
+Remove-Item newslore.db
+
+# macOS / Linux
+rm newslore.db
+```
+
+Restart the server — `create_all` in the lifespan will recreate every table.
+
+### Open the SQLite shell
+
+```powershell
+# Windows (sqlite3.exe must be on PATH — download from https://sqlite.org/download.html)
+sqlite3 newslore.db
+
+# macOS / Linux
+sqlite3 newslore.db
+```
+
+Useful shell commands once inside:
+
+```sql
+.tables                          -- list all tables
+.schema series                   -- show CREATE TABLE for one table
+.mode column                     -- align output into columns
+.headers on                      -- show column names in output
+.quit                            -- exit
+```
+
+### Inspect state
+
+```sql
+-- All series and their status
+SELECT id, title, status, discovery_depth, last_refreshed_at FROM series;
+
+-- All timelines (active and archived)
+SELECT id, series_id, confidence_score, is_active, built_at FROM master_timelines;
+
+-- All context build jobs with timing
+SELECT id, series_id, job_type, status, scraping_time_ms, timeline_time_ms, total_time_ms
+FROM context_build_jobs ORDER BY created_at DESC;
+
+-- All episodes with mode and quality rating
+SELECT id, series_id, episode_number, mode, status, quality_rating, llm_time_ms
+FROM episodes ORDER BY created_at DESC;
+
+-- All connection suggestions for a series (replace 1 with your series id)
+SELECT id, connected_topic, status, relationship_hint FROM series_connections WHERE series_id = 1;
+```
+
+### Performance summary (Phase 2 gate query)
+
+```sql
+-- Context build averages
+SELECT
+  ROUND(AVG(scraping_time_ms) / 1000.0, 1) AS avg_scrape_s,
+  ROUND(AVG(timeline_time_ms) / 1000.0, 1) AS avg_timeline_s,
+  ROUND(AVG(total_time_ms)    / 1000.0, 1) AS avg_total_s,
+  COUNT(*) AS total_jobs
+FROM context_build_jobs WHERE status = 'done';
+
+-- Episode generation averages
+SELECT
+  ROUND(AVG(llm_time_ms) / 1000.0, 1) AS avg_llm_s,
+  COUNT(*) AS total_episodes,
+  ROUND(AVG(quality_rating), 2) AS avg_quality
+FROM episodes WHERE status = 'done';
+```
+
+### Insert a series directly (bypass the API)
+
+Useful for seeding test data without waiting for the server.
+
+```sql
+INSERT INTO series (title, description, status, discovery_depth, created_at)
+VALUES (
+  'Silicon Valley Bank Collapse',
+  'Focus on contagion risk, Fed rate hikes, and the startup funding freeze',
+  'building',
+  0,
+  datetime('now')
+);
+```
+
+Run `SELECT last_insert_rowid();` immediately after to get the new series id.
+
+### Wipe one series cleanly (via API, cascade-safe)
+
+```
+DELETE /series/{id}
+```
+
+This cascades to timelines, episodes, context jobs, and connections. Prefer this over direct SQL deletes.
+
+---
+
 ## Phase Roadmap
 
 | Phase | Status | Goal |
