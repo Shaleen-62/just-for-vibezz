@@ -1,5 +1,8 @@
 # NewsLore
 
+> Note: this repo is still named `just-for-vibezz` from when it started as an experiment — the
+> project itself is called **NewsLore**. (Worth renaming the repo to match when you get to it.)
+
 A backend system that turns complex news topics into episodic, narrative-style stories delivered as a weekly newsletter. Topics are scraped once to build a deep master timeline; weekly runs draw from that timeline to generate new story episodes in rotating styles — gossip, documentary, explainer, or cartoon fable.
 
 ---
@@ -24,8 +27,8 @@ Scraping and story generation are fully decoupled. Weekly runs touch no scrapers
 **1. Clone and create a virtual environment**
 
 ```bash
-git clone <repo-url>
-cd newslore
+git clone https://github.com/Shaleen-62/just-for-vibezz.git
+cd just-for-vibezz
 python -m venv venv
 venv\Scripts\activate        # Windows
 # source venv/bin/activate   # macOS/Linux
@@ -309,3 +312,7 @@ This cascades to timelines, episodes, context jobs, and connections. Prefer this
 | Phase 3 | Not started | Automated refresh detection via RSS/NewsAPI daily scan |
 
 Phase 2 is gated on 4 weeks of real timing data from Phase 1. See `newslore-implementation-plan.md` for the measurement gate criteria.
+
+## Tech
+
+FastAPI, SQLAlchemy, APScheduler, Groq (LLM), Resend (email delivery), Docker Compose.
